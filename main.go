@@ -10,23 +10,23 @@ import (
 	"time"
 )
 
-type WebhookPayload struct {
-	ID        int                    `json:"id"`
-	Event     string                 `json:"event"`
-	Data      map[string]interface{} `json:"data"`
-	Timestamp int64                  `json:"timestamp"`
-	Received  time.Time              `json:"received"`
+type StoredWebhook struct {
+	ID       int         `json:"id"`
+	Payload  interface{} `json:"payload"`
+	Received time.Time   `json:"received"`
 }
 
 type WebhookStore struct {
 	mu       sync.RWMutex
-	webhooks []WebhookPayload
+	webhooks []StoredWebhook
 	nextID   int
+	maxSize  int
 }
 
 var store = &WebhookStore{
-	webhooks: make([]WebhookPayload, 0),
+	webhooks: make([]StoredWebhook, 0),
 	nextID:   1,
+	maxSize:  5,
 }
 
 func main() {
@@ -35,34 +35,49 @@ func main() {
 	http.HandleFunc("/webhooks/", getWebhookByIDHandler)
 
 	fmt.Println("Webhook server listening on :8080...")
+	fmt.Println("Stack-based storage: Maximum 5 webhooks (LIFO)")
 	fmt.Println("Endpoints:")
 	fmt.Println("  POST /webhook - Receive webhooks")
-	fmt.Println("  GET /webhooks - Get all webhooks")
+	fmt.Println("  GET /webhooks - Get all webhooks (most recent first)")
 	fmt.Println("  GET /webhooks/{id} - Get webhook by ID")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func (ws *WebhookStore) Add(payload WebhookPayload) {
+// Store incoming webhooks (stack behavior - LIFO with max size)
+func (ws *WebhookStore) Add(payload interface{}) int {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
-	payload.ID = ws.nextID
-	payload.Received = time.Now()
-	ws.webhooks = append(ws.webhooks, payload)
+	storedWebhook := StoredWebhook{
+		ID:       ws.nextID,
+		Payload:  payload,
+		Received: time.Now(),
+	}
+
+	ws.webhooks = append(ws.webhooks, storedWebhook)
+	currentID := ws.nextID
 	ws.nextID++
+
+	if len(ws.webhooks) > ws.maxSize {
+		ws.webhooks = ws.webhooks[1:]
+	}
+
+	return currentID
 }
 
-func (ws *WebhookStore) GetAll() []WebhookPayload {
+func (ws *WebhookStore) GetAll() []StoredWebhook {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 
-	result := make([]WebhookPayload, len(ws.webhooks))
-	copy(result, ws.webhooks)
+	result := make([]StoredWebhook, len(ws.webhooks))
+	for i, j := 0, len(ws.webhooks)-1; i < len(ws.webhooks); i, j = i+1, j-1 {
+		result[i] = ws.webhooks[j]
+	}
 	return result
 }
 
-func (ws *WebhookStore) GetByID(id int) (WebhookPayload, bool) {
+func (ws *WebhookStore) GetByID(id int) (StoredWebhook, bool) {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 
@@ -71,7 +86,34 @@ func (ws *WebhookStore) GetByID(id int) (WebhookPayload, bool) {
 			return webhook, true
 		}
 	}
-	return WebhookPayload{}, false
+	return StoredWebhook{}, false
+}
+
+func getStringFromPayload(payload interface{}, key string) string {
+	if payloadMap, ok := payload.(map[string]interface{}); ok {
+		if value, exists := payloadMap[key]; exists {
+			if strValue, ok := value.(string); ok {
+				return strValue
+			}
+		}
+	}
+	return ""
+}
+
+func getInt64FromPayload(payload interface{}, key string) int64 {
+	if payloadMap, ok := payload.(map[string]interface{}); ok {
+		if value, exists := payloadMap[key]; exists {
+			switch v := value.(type) {
+			case int64:
+				return v
+			case int:
+				return int64(v)
+			case float64:
+				return int64(v)
+			}
+		}
+	}
+	return 0
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -80,23 +122,33 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload WebhookPayload
+	var payload interface{}
 	err := json.NewDecoder(r.Body).Decode(&payload)
 	if err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Store the webhook
-	store.Add(payload)
+	assignedID := store.Add(payload)
 
-	// Process the webhook
-	fmt.Printf("Received webhook event: %s\n", payload.Event)
-	fmt.Printf("Payload data: %+v\n", payload.Data)
-	fmt.Printf("Timestamp: %d\n", payload.Timestamp)
+	event := getStringFromPayload(payload, "event")
+	timestamp := getInt64FromPayload(payload, "timestamp")
+
+	fmt.Printf("Stored webhook with ID: %d\n", assignedID)
+	if event != "" {
+		fmt.Printf("Event: %s\n", event)
+	}
+	if timestamp != 0 {
+		fmt.Printf("Timestamp: %d\n", timestamp)
+	}
+	fmt.Printf("Full payload: %+v\n", payload)
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Webhook received and stored successfully"))
+	response := map[string]interface{}{
+		"message": "Webhook received and stored successfully",
+		"id":      assignedID,
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func getWebhooksHandler(w http.ResponseWriter, r *http.Request) {
