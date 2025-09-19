@@ -33,6 +33,7 @@ func main() {
 	http.HandleFunc("/webhook", webhookHandler)
 	http.HandleFunc("/webhooks", getWebhooksHandler)
 	http.HandleFunc("/webhooks/", getWebhookByIDHandler)
+	http.HandleFunc("/webhooks/clear", clearWebhooksHandler)
 
 	fmt.Println("Webhook server listening on :8080...")
 	fmt.Println("Stack-based storage: Maximum 5 webhooks (LIFO)")
@@ -116,6 +117,17 @@ func getInt64FromPayload(payload interface{}, key string) int64 {
 	return 0
 }
 
+func (ws *WebhookStore) Clear() int {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	count := len(ws.webhooks)
+	ws.webhooks = make([]StoredWebhook, 0)
+	ws.nextID = 1
+
+	return count
+}
+
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -193,4 +205,17 @@ func getWebhookByIDHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(webhook)
+}
+
+func clearWebhooksHandler(w http.ResponseWriter, r *http.Request) {
+	clearedCount := store.Clear()
+
+	fmt.Printf("Cleared all webhooks. Total cleared: %d\n", clearedCount)
+
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]interface{}{
+		"message":       "All webhooks cleared successfully",
+		"cleared_count": clearedCount,
+	}
+	json.NewEncoder(w).Encode(response)
 }
